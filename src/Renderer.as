@@ -1,17 +1,22 @@
 package  {
 	import com.adobe.utils.AGALMiniAssembler;
+	import flash.display.BitmapData;
+	import flash.display.BitmapDataChannel;
 	import flash.display.Stage3D;
 	import flash.display3D.Context3D;
 	import flash.display3D.Context3DProgramType;
 	import flash.display3D.Context3DRenderMode;
+	import flash.display3D.Context3DTextureFormat;
 	import flash.display3D.Context3DTriangleFace;
 	import flash.display3D.Context3DVertexBufferFormat;
 	import flash.display3D.IndexBuffer3D;
 	import flash.display3D.Program3D;
+	import flash.display3D.textures.Texture;
 	import flash.display3D.VertexBuffer3D;
 	import flash.events.Event;
 	import flash.events.EventDispatcher;
 	import flash.geom.Matrix3D;
+	import flash.geom.Point;
 	import flash.geom.Rectangle;
 	import flash.geom.Vector3D;
 	import no.doomsday.console.ConsoleUtil;
@@ -20,14 +25,21 @@ package  {
 		private var w:int;
 		private var h:int;
 		
-		private var sx:int = 150;
-		private var sy:int = 150;
-		private var sz:int = 150;
+		public var textureImage:BitmapData;
+		
+		private var sideTextureSize:Number = 1/16;
+		
+		private var sx:int = 50;
+		private var sy:int = 50;
+		private var sz:int = 50;
+		
 		private var rotationSpeed:Number = 0.5;
 		//private var rotationSpeed:Number = 2;
 		
 		private var bufferLimit:int = 65535;
-		private var dataPerVertex:int = 3;
+		//private var dataPerVertex:int = 3;
+		//private var dataPerVertex:int = 5;
+		private var dataPerVertex:int = 8;
 		
 		private var blocks:Vector.<int> = new Vector.<int>(sx*sy*sz);
 		
@@ -46,7 +58,7 @@ package  {
 		
 		private var stage3D:Stage3D;
 		private var program:Program3D;
-		private var camera:Matrix3D;
+		public var camera:Matrix3D;
 		private var rotX:Number = 0;
 		private var rotY:Number = 0;
 		private var buffers:int;
@@ -81,7 +93,13 @@ package  {
 				//"m44 op, va0, vc0"
 				"m44 vt0, va0, vc0",
 				"mov op, vt0",
-				"mov v0, vt0.z"
+				//"mov v0, vt0.z",
+				//"mov v1, va1",
+				//"mov v2, va2",
+				//"mov v3, va0"
+				"mov v0, va0",
+				"mov v1, va1",
+				"mov v2, va2"
 			];
 			
 			var vertexShaderAssembler:AGALMiniAssembler = new AGALMiniAssembler();
@@ -90,22 +108,54 @@ package  {
 			//var farplane:Number = 0.05;
 			//var farplane:Number = 20;
 			//var farplane:Number = 50;
-			var farplane:Number = 100;
+			//var farplane:Number = 100;
 			//var farplane:Number = 80;
-			//var farplane:Number = 10+sx*2;
+			var farplane:Number = 10+sx*2;
+			//var farplane:Number = 200;
 			context.setProgramConstantsFromVector(Context3DProgramType.FRAGMENT, 0, new <Number>[
 				0, 0, 0, 1,
 				0.7, 0.7, 0.7, 1,
-				farplane, farplane, farplane, farplane
+				farplane, farplane, farplane, farplane,
+				//0.6176486395892539, 0.7126715072183698, 0.33258003670190595, 1, // Light vector for parallel
+				//13, 15, 7, 1
+				sx/2, sy/2, sz/2, 0, // Light position for directional lighting
+				0, 0, 0, 0,
+				//0.25, 0.25, 0.25, 0
+				0.2, 0.2, 0.2, 0
 			]);
 			var fragmentShader:Array =
 			[
+				/*
 				"div ft0, fc2, v0",
 				"mul ft1, ft0, fc0",
 				"rcp ft0, ft0",
 				"mul ft2, ft0, fc1",
 				"add ft1, ft1, ft2",
-				"mov oc, ft1"
+				"mov oc, ft1",
+				//*/
+				
+				// Texture
+				"tex ft0, v1, fs0 <2d,clamp,nomip>",
+				
+				// Parallel lighting
+				//"dp3 ft1, fc3, v2",
+				
+				///*
+				// Lambert directional
+				"sub ft1, fc3, v0",
+				"nrm ft1.xyz, ft1",
+				"dp3 ft1, ft1, v2",
+				"max ft1, ft1, fc4",
+				//*/
+				
+				// 
+				
+				// Ambient
+				"add ft1, ft1, fc5",
+				
+				// Apply lighting
+				"mul ft0, ft0, ft1",
+				"mov oc, ft0"
 			];
 			var fragmentAssembler:AGALMiniAssembler = new AGALMiniAssembler();
 			fragmentAssembler.assemble(flash.display3D.Context3DProgramType.FRAGMENT, fragmentShader.join("\n"));
@@ -113,12 +163,7 @@ package  {
 			program = context.createProgram();
 			program.upload(vertexShaderAssembler.agalcode, fragmentAssembler.agalcode);
 			
-			//indexBuffer.uploadFromVector(indices, 0, indices.length);
-			
-			//context.setVertexBufferAt(0, vertexBuffer, 0, Context3DVertexBufferFormat.FLOAT_2); //xy
-			//context.setVertexBufferAt(1, vertexBuffer, 2, Context3DVertexBufferFormat.FLOAT_2); //uv
-			//context.setTextureAt(0, texture);
-			
+			uploadTexture(0, textureImage);
 			context.setProgram(program);
 			
 			context.setCulling(Context3DTriangleFace.BACK);
@@ -126,11 +171,18 @@ package  {
 			
 			camera = new Matrix3D();
 			
+			generateWorld();
 			constructGeometry();
 			
 			//render();
 			
 			dispatchEvent(new Event(Event.INIT));
+		}
+		private function uploadTexture(sampler:int, image:BitmapData):void {
+			//textureSize = Math.max(Math.pow(2, Math.ceil(Math.LOG2E*Math.log(image.width))), Math.pow(2, Math.ceil(Math.LOG2E*Math.log(image.height))));
+			var texture:Texture = context.createTexture(image.width, image.height, Context3DTextureFormat.BGRA, false);
+			texture.uploadFromBitmapData(image);
+			context.setTextureAt(sampler, texture);
 		}
 		
 		private function getBlockId(x:int, y:int, z:int):int {
@@ -141,20 +193,49 @@ package  {
 			if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz) return;
 			blocks[x%sx+(y%sy)*sx+(z%sz)*sx*sy] = bid;
 		}
-		private function constructGeometry():void {
-			var i:int;
+		private function generateWorld():void {
 			/*
+			var perlin:BitmapData = new BitmapData(1, 1, false);
+			var offset:Point = new Point(0, 0);
+			var waterLevel:int = 30;
+			
+			for (var x:int = 0; x < sx; x++) {
+				for (var z:int = 0; z < sz; z++) {
+					offset.x = x;
+					offset.y = z;
+					perlin.perlinNoise(100, 100, 3, 0, false, true, BitmapDataChannel.BLUE, false, [offset, offset, offset]);
+					var height:int = (perlin.getPixel(0, 0)/0xFF)*200;
+					for (var y:int = 0; y < sy; y++) {
+						var bid:int = 0;
+						if (y <= height) bid = 1;
+						setBlockId(x, y, z, bid);
+						//blocks[y+(z*sy+(x*sy*sz))] = bid;
+					}
+				}
+			}
+			//*/
+			var i:int;
+			///*
 			for (i = 0; i < blocks.length; i++) {
 				blocks[i] = Math.random() > 0.9 ? 1 : 0;
 				//blocks[i] = (i%sx) == 0 && (i%(sx*sy)) == 0 && (i%(sx*sy*sz)) == 0 ? 1 : 0;
 			}
 			//*/
+		}
+		private function constructGeometry():void {
+			var i:int;
 			var x:int, y:int, z:int;
-			///*
+			/*
 			for (z = 0; z < sz; z++) {
 				for (y = 0; y < sy; y++) {
 					for (x = 0; x < sx; x++) {
-						setBlockId(x, y, z, x%2 == 0 && y%2 == 0 && z%2 == 0 ? 1 : 0);
+						//setBlockId(x, y, z, x%2 == 0 && y%2 == 0 && z%2 == 0 ? 1 : 0);
+						
+						var offset:Number = -Math.PI/2;
+						//var mul:Number = Math.PI*2*(1+int(x/sx*5)/5*5);
+						var mul:Number = Math.PI*2*(50);
+						var v:int = Math.sin(x/sx*mul+offset)+Math.sin(y/sy*mul+offset)+Math.sin(z/sz*mul+offset) > 0 ? 1 : 0;
+						setBlockId(x, y, z, v);
 					}
 				}
 			}
@@ -301,61 +382,99 @@ package  {
 			}
 		}
 		
-		private function addQuad(x:Number, y:Number, z:Number, plane:int, order:int):void {
+		private function addQuad(x:Number, y:Number, z:Number, plane:int, order:int, u:Number = 0, v:Number = 0):void {
 			var index:int;
 			
 			index = vertices.length;
+			
+			// TODO unsure of orientation
 			switch (plane) {
 				case 0: // X PLANE
 					vertices[index++] = x;
 					vertices[index++] = y;
 					vertices[index++] = z;
+					vertices[index++] = u;
+					vertices[index++] = v+sideTextureSize;
+					vertices[index++] = -order; vertices[index++] = 0; vertices[index++] = 0; // Normal
 					
 					vertices[index++] = x;
 					vertices[index++] = y+1;
 					vertices[index++] = z;
+					vertices[index++] = u;
+					vertices[index++] = v;
+					vertices[index++] = -order; vertices[index++] = 0; vertices[index++] = 0; // Normal
 					
 					vertices[index++] = x;
 					vertices[index++] = y+1;
 					vertices[index++] = z+1;
+					vertices[index++] = u+sideTextureSize;
+					vertices[index++] = v;
+					vertices[index++] = -order; vertices[index++] = 0; vertices[index++] = 0; // Normal
 					
 					vertices[index++] = x;
 					vertices[index++] = y;
 					vertices[index++] = z+1;
+					vertices[index++] = u+sideTextureSize;
+					vertices[index++] = v+sideTextureSize;
+					vertices[index++] = -order; vertices[index++] = 0; vertices[index++] = 0; // Normal
 					break;
 				case 1: // Y PLANE
 					vertices[index++] = x;
 					vertices[index++] = y;
 					vertices[index++] = z;
+					vertices[index++] = u;
+					vertices[index++] = v;
+					vertices[index++] = 0; vertices[index++] = order; vertices[index++] = 0; // Normal
 					
 					vertices[index++] = x+1;
 					vertices[index++] = y;
 					vertices[index++] = z;
+					vertices[index++] = u+sideTextureSize;
+					vertices[index++] = v;
+					vertices[index++] = 0; vertices[index++] = order; vertices[index++] = 0; // Normal
 					
 					vertices[index++] = x+1;
 					vertices[index++] = y;
 					vertices[index++] = z+1;
+					vertices[index++] = u+sideTextureSize;
+					vertices[index++] = v+sideTextureSize;
+					vertices[index++] = 0; vertices[index++] = order; vertices[index++] = 0; // Normal
 					
 					vertices[index++] = x;
 					vertices[index++] = y;
 					vertices[index++] = z+1;
+					vertices[index++] = u;
+					vertices[index++] = v+sideTextureSize;
+					vertices[index++] = 0; vertices[index++] = order; vertices[index++] = 0; // Normal
 					break;
 				case 2: // Z PLANE
 					vertices[index++] = x;
 					vertices[index++] = y;
 					vertices[index++] = z;
+					vertices[index++] = u;
+					vertices[index++] = v+sideTextureSize;
+					vertices[index++] = 0; vertices[index++] = 0; vertices[index++] = -order; // Normal
 					
 					vertices[index++] = x+1;
 					vertices[index++] = y;
 					vertices[index++] = z;
+					vertices[index++] = u+sideTextureSize;
+					vertices[index++] = v+sideTextureSize;
+					vertices[index++] = 0; vertices[index++] = 0; vertices[index++] = -order; // Normal
 					
 					vertices[index++] = x+1;
 					vertices[index++] = y+1;
 					vertices[index++] = z;
+					vertices[index++] = u+sideTextureSize;
+					vertices[index++] = v;
+					vertices[index++] = 0; vertices[index++] = 0; vertices[index++] = -order; // Normal
 					
 					vertices[index++] = x;
 					vertices[index++] = y+1;
 					vertices[index++] = z;
+					vertices[index++] = u;
+					vertices[index++] = v;
+					vertices[index++] = 0; vertices[index++] = 0; vertices[index++] = -order; // Normal
 					break;
 			}
 			
@@ -386,7 +505,6 @@ package  {
 			numIndices += 6;
 		}
 		
-		
 		private function perspectiveProjection(fov:Number = 90, aspect:Number = 1, near:Number = 1, far:Number = 2048):Matrix3D {
 			var y2:Number = near * Math.tan(fov * Math.PI / 360);
 			var y1:Number = -y2;
@@ -409,6 +527,7 @@ package  {
 		}
 		
 		public function run(toggle:Boolean = false, v:Number = 0):void {
+			/*
 			camera.identity();
 			camera.appendRotation(rotX, Vector3D.X_AXIS);
 			camera.appendRotation(rotY, Vector3D.Y_AXIS);
@@ -418,30 +537,63 @@ package  {
 			//camera.appendTranslation(0, 0, -25);
 			camera.appendTranslation(0, 0, -10-sx);
 			//camera.appendTranslation(0, 0, -90);
+			//camera.appendTranslation(0, 0, -200);
 			//rotX += Math.PI-3;
 			//rotY += 1;
 			//rotX += rotationSpeed;
 			rotX += (Math.PI-3)*rotationSpeed;
 			rotY += rotationSpeed;
+			*/
 			render(toggle, v);
 		}
 		private function render(toggle:Boolean = false, v:Number = 0):void {
-			context.clear(1, 1, 1, 0);
+			//context.clear(1, 1, 1, 0);
+			context.clear(0, 0, 0, 0);
 			
 			var mvp:Matrix3D = new Matrix3D();
+			//var mvp:Matrix3d = new Matrix3d();
 			
 			var viewMatrix:Matrix3D = new Matrix3D();
+			//var viewMatrix:Matrix3d = new Matrix3d();
 			viewMatrix.appendTranslation(-sx/2, -sy/2, -sz/2);
 			mvp.append(viewMatrix);
 			
 			//camera.appendScale(100, 100, 100);
 			mvp.append(camera);
+			//mvp.append(camera);
+			
+			//var c:Matrix3D = new Matrix3D();
+			//c.appendTranslation(camera.position.x, camera.position.y, camera.position.z);
+			//mvp.append(c);
+			
+			//mvp.append(perspectiveProjection(90, w/h, 1, toggle ? v*2000 : 1000));
+			//mvp.append(perspectiveProjection(90, w/h, toggle ? v*1000 : 1, 1000));
+			mvp.append(perspectiveProjection(90, w/h, 0.01, 1000));
+			//mvp.append(perspectiveProjection(90, w/h, 1, 1000));
+			//mvp.append(perspectiveProjection(90, w/h, 1, 100));
+			//mvp.append(perspectiveProjection(90, w/h, 0.4, 100));
+			//mvp.append(perspectiveProjection(70, w/h, 0.5, 10000));
+			//ConsoleUtil.print(v*5);
+			//mvp.append(perspectiveProjection(70, w/h, toggle ? v*5 : 0.5, 10000));
+			//mvp.append(perspectiveProjection(70, w/h, 0.5, 10000));
+			
+			//mvp.append(perspectiveProjection(120, w/h, 0.01, 1000));
 			
 			//mvp.append(perspectiveProjection(90, 1, 1, 100));
-			mvp.append(perspectiveProjection(90, w/h));
 			//mvp.append(perspectiveProjection(90, 1, 0.5));
 			
 			context.setProgramConstantsFromMatrix(Context3DProgramType.VERTEX, 0, mvp, true);
+			
+			///*
+			//var rawData:Vector.<Number> = camera.rawData;
+			//context.setProgramConstantsFromVector(Context3DProgramType.FRAGMENT, 3, new <Number>[
+				//rawData[12], rawData[13], rawData[14], 0
+			//]);
+			//*/
+			
+			//ConsoleUtil.print(camera.position+" "+camera.rawData);
+			//ConsoleUtil.print(camera.rawData);
+			//ConsoleUtil.print(rawData[12]+" "+rawData[13]+" "+rawData[14]+"  "+rawData);
 			
 			//var i:int = currentBufferIndex;
 			
@@ -459,7 +611,14 @@ package  {
 			for (var i:int = startBuffer; i < endBuffer; i++) {
 				var vb:VertexBuffer3D = vertexBuffers[i];
 				var ib:IndexBuffer3D = indexBuffers[i];
+				
+				// Position
 				context.setVertexBufferAt(0, vb, 0, Context3DVertexBufferFormat.FLOAT_3);
+				// UV Texture Coords
+				context.setVertexBufferAt(1, vb, 3, Context3DVertexBufferFormat.FLOAT_2);
+				// Normal
+				context.setVertexBufferAt(2, vb, 5, Context3DVertexBufferFormat.FLOAT_3);
+				
 				context.drawTriangles(ib);
 			}
 			
